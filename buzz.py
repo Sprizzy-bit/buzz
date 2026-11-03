@@ -241,30 +241,52 @@ def main() -> int:
         now = now.replace(tzinfo=local)
     state_path = Path(env("STATE_FILE", str(HERE / "state.json")))
 
-    state = {"sent": {}, "done": [], "snooze": {}}
+    state = {"sent": {}, "done": {}, "undone": {}, "snooze": {}}
     if state_path.exists():
         try:
             state.update(json.loads(state_path.read_text()))
         except json.JSONDecodeError:
             pass
-    done = set(state["done"])
-    newly_done: set[str] = set()
+    # done/undone map key -> time of the latest tap; it's done if the
+    # latest Done tap is newer than the latest Undo.
+    done_at: dict[str, float] = state["done"]
+    if isinstance(done_at, list):  # old format
+        done_at = {k: 0 for k in done_at}
+    undone_at: dict[str, float] = state.get("undone") or {}
+
+    def is_done(k):
+        return k in done_at and done_at[k] > undone_at.get(k, -1)
+
+    before = {k for k in done_at if is_done(k)}
     newly_snoozed: dict[str, int] = {}
 
-    # 1. sync Done / Snooze taps
+    # 1. sync Done / Undo / Snooze taps
     if not dry or env("SYNC_IN_DRY_RUN") == "1":
         for m in read_control_messages(server, topic):
             text = m["message"].strip()
+            t = float(m.get("time", time.time()))
             if text.startswith("done "):
-                if text[5:] not in done:
-                    newly_done.add(text[5:])
-                done.add(text[5:])
+                k = text[5:]
+                done_at[k] = max(done_at.get(k, 0), t)
+            elif text.startswith("undo "):
+                k = text[5:]
+                undone_at[k] = max(undone_at.get(k, 0), t)
             elif text.startswith("snooze "):
                 _, mins, key = text.split(" ", 2)
                 until = m.get("time", time.time()) + int(mins) * 60
                 if until > state["snooze"].get(key, 0) and until > now.timestamp():
                     newly_snoozed[key] = int(mins)
                 state["snooze"][key] = max(state["snooze"].get(key, 0), until)
+
+    # one-off: UNDO_DONE_BEFORE=<ISO time> un-marks every Done tapped before then
+    if env("UNDO_DONE_BEFORE"):
+        cutoff = datetime.fromisoformat(env("UNDO_DONE_BEFORE").replace("Z", "+00:00")).timestamp()
+        for k, t in done_at.items():
+            if t < cutoff:
+                undone_at[k] = max(undone_at.get(k, 0), cutoff)
+    done = {k for k in done_at if is_done(k)}
+    newly_done = done - before
+    newly_undone = before - done
 
     # 2. fetch calendar
     if ics_url.startswith("file://") or os.path.exists(ics_url):
@@ -278,8 +300,19 @@ def main() -> int:
     for key in sorted(newly_done):
         if key in titles:
             try:
+                undo = [{"action": "http", "label": "Undo", "url": f"{server}/{topic}-done",
+                         "method": "POST", "body": f"undo {key}", "clear": True}]
                 send(server, topic, f"✅ Done: {titles[key]}",
-                     "Got it. No more alerts for this one.", 2, ["white_check_mark"], [], None, dry)
+                     "Got it. No more alerts for this one.", 2, ["white_check_mark"], undo, None, dry)
+            except Exception as ex:
+                print(f"warn: confirm failed: {ex}", file=sys.stderr)
+    for key in sorted(newly_undone):
+        if key in titles:
+            try:
+                send(server, topic, f"↩️ Back on: {titles[key]}",
+                     "Unmarked. Alerts for this one will start again.", 3, ["leftwards_arrow_with_hook"],
+                     [], None, dry)
+                state["sent"].pop(key, None)  # buzz again on this run
             except Exception as ex:
                 print(f"warn: confirm failed: {ex}", file=sys.stderr)
     for key, mins in newly_snoozed.items():
@@ -353,10 +386,11 @@ def main() -> int:
     # 4. tidy and save state (forget anything no longer in the window)
     state["sent"] = {k: v for k, v in state["sent"].items() if k in live_keys}
     state["snooze"] = {k: v for k, v in state["snooze"].items() if k in live_keys}
-    state["done"] = sorted(k for k in done if k in live_keys)
+    state["done"] = {k: v for k, v in done_at.items() if k in live_keys}
+    state["undone"] = {k: v for k, v in undone_at.items() if k in live_keys}
     if not dry:
         state_path.write_text(json.dumps(state, indent=1))
-    print(f"{len(live_keys)} assignment(s) in window, {len(state['done'])} done, "
+    print(f"{len(live_keys)} assignment(s) in window, {len(done & live_keys)} done, "
           f"{sent_count} alert(s) sent.")
     return 0
 

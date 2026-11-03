@@ -2,7 +2,12 @@ name: buzz
 on:
   schedule:
     - cron: "*/10 * * * *"   # every 10 min (GitHub may run it a few minutes late)
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      undo_done_before:
+        description: "Optional: un-mark every Done tapped before this time (e.g. 2026-11-03T07:43:00Z)"
+        required: false
+        default: ""
 concurrency: { group: buzz, cancel-in-progress: false }
 jobs:
   buzz:
@@ -23,6 +28,7 @@ jobs:
           TZ_NAME: ${{ vars.TZ_NAME || 'America/Chicago' }}
           QUIET_HOURS: ${{ vars.QUIET_HOURS }}
           STATE_FILE: state.json
+          UNDO_DONE_BEFORE: ${{ inputs.undo_done_before }}
         run: python3 buzz.py
       - name: Save state
         if: always()

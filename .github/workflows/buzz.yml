@@ -1,0 +1,32 @@
+name: buzz
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 min (GitHub may run it a few minutes late)
+  workflow_dispatch: {}
+concurrency: { group: buzz, cancel-in-progress: false }
+jobs:
+  buzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Restore state (which alerts were sent / marked done)
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: buzz-state-${{ github.run_id }}
+          restore-keys: buzz-state-
+      - name: Buzz
+        env:
+          ELEARN_ICS_URL: ${{ secrets.ELEARN_ICS_URL }}
+          NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}
+          TZ_NAME: ${{ vars.TZ_NAME || 'America/Chicago' }}
+          QUIET_HOURS: ${{ vars.QUIET_HOURS }}
+          STATE_FILE: state.json
+        run: python3 buzz.py
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: buzz-state-${{ github.run_id }}

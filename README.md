@@ -14,6 +14,8 @@ Buzzes your phone about eLearn deadlines, harder and more often as they get clos
 
 Each alert has **Done ✅** (stops that assignment for good), **Snooze 1h**, and **Open** (jumps to eLearn when the feed has a link).
 
+After you tap Done or Snooze, a quiet ✅ / 😴 confirmation shows up within 10 minutes. For an instant confirmation, also subscribe in ntfy to your topic name with `-done` on the end (e.g. `buzz-ron-8f3k2q9x-done`).
+
 ## Setup (about 10 minutes)
 
 ### 1. Phone: install ntfy

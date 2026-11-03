@@ -248,16 +248,22 @@ def main() -> int:
         except json.JSONDecodeError:
             pass
     done = set(state["done"])
+    newly_done: set[str] = set()
+    newly_snoozed: dict[str, int] = {}
 
     # 1. sync Done / Snooze taps
     if not dry or env("SYNC_IN_DRY_RUN") == "1":
         for m in read_control_messages(server, topic):
             text = m["message"].strip()
             if text.startswith("done "):
+                if text[5:] not in done:
+                    newly_done.add(text[5:])
                 done.add(text[5:])
             elif text.startswith("snooze "):
                 _, mins, key = text.split(" ", 2)
                 until = m.get("time", time.time()) + int(mins) * 60
+                if until > state["snooze"].get(key, 0) and until > now.timestamp():
+                    newly_snoozed[key] = int(mins)
                 state["snooze"][key] = max(state["snooze"].get(key, 0), until)
 
     # 2. fetch calendar
@@ -266,6 +272,23 @@ def main() -> int:
     else:
         text = http("GET", ics_url.replace("webcal://", "https://", 1), timeout=60)
     events = parse_events(text, local)
+
+    # confirm Done / Snooze taps so you know they registered
+    titles = {e["key"]: e["title"] for e in events}
+    for key in sorted(newly_done):
+        if key in titles:
+            try:
+                send(server, topic, f"✅ Done: {titles[key]}",
+                     "Got it. No more alerts for this one.", 2, ["white_check_mark"], [], None, dry)
+            except Exception as ex:
+                print(f"warn: confirm failed: {ex}", file=sys.stderr)
+    for key, mins in newly_snoozed.items():
+        if key in titles and key not in done:
+            try:
+                send(server, topic, f"😴 Snoozed: {titles[key]}",
+                     f"Quiet for {mins} min, then it starts again.", 2, ["zzz"], [], None, dry)
+            except Exception as ex:
+                print(f"warn: confirm failed: {ex}", file=sys.stderr)
 
     # 3. decide who gets buzzed
     sent_count = 0
@@ -303,9 +326,13 @@ def main() -> int:
         done_url = f"{server}/{topic}-done"
         actions = [
             {"action": "http", "label": "Done ✅", "url": done_url, "method": "POST",
-             "body": f"done {ev['key']}", "clear": True},
+             "body": f"done {ev['key']}", "clear": True,
+             "headers": {"Title": f"✅ Done: {ev['title']}", "Priority": "2",
+                         "Tags": "white_check_mark"}},
             {"action": "http", "label": "Snooze 1h", "url": done_url, "method": "POST",
-             "body": f"snooze 60 {ev['key']}", "clear": True},
+             "body": f"snooze 60 {ev['key']}", "clear": True,
+             "headers": {"Title": f"😴 Snoozed 1h: {ev['title']}", "Priority": "2",
+                         "Tags": "zzz"}},
         ]
         if ev["url"]:
             actions.append({"action": "view", "label": "Open", "url": ev["url"]})
